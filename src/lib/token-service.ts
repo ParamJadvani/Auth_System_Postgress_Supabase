@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import db from "@/db";
 import { tokens, users } from "@/db/schema";
-import { eq, and, lt } from "drizzle-orm";
+import { eq, and, lt, isNull, sql } from "drizzle-orm";
 
 // Constants for token configuration
 const TOKEN_EXPIRY = {
@@ -20,7 +20,6 @@ export const generateToken = (): string => {
 
 // Helper to get IP address from request
 export const getIpFromRequest = (req: Request): string => {
-    // In production, you might need to handle X-Forwarded-For and other headers
     const forwarded = req.headers.get("x-forwarded-for");
     return forwarded ? forwarded.split(",")[0].trim() : "127.0.0.1";
 };
@@ -67,19 +66,20 @@ export const verifyToken = async (
     token: string,
     type: "access" | "refresh" | "verification" | "password_reset"
 ) => {
-    const tokenRecord = await db
+    const tokenRecords = await db
         .select()
         .from(tokens)
         .where(
             and(
                 eq(tokens.token, token),
                 eq(tokens.type, type),
-                eq(tokens.revokedAt, undefined),
-                lt(new Date(), tokens.expires)
+                isNull(tokens.revokedAt), // Use isNull instead of eq with undefined
+                lt(sql`${new Date()}`, tokens.expires) // Use sql wrapper to compare Date
             )
         );
 
-    return tokenRecord || null;
+    // Return the first token record if found, otherwise null
+    return tokenRecords.length > 0 ? tokenRecords[0] : null;
 };
 
 // Revoke a token (e.g., on logout)
@@ -101,7 +101,7 @@ export const revokeAllUserTokens = async (userId: string, ip: string) => {
             revokedAt: new Date(),
             revokedByIp: ip,
         })
-        .where(and(eq(tokens.userId, userId), eq(tokens.revokedAt, undefined)));
+        .where(and(eq(tokens.userId, userId), isNull(tokens.revokedAt))); // Use isNull instead of eq with undefined
 };
 
 // Authenticate with cookies
@@ -111,9 +111,9 @@ export const authenticateWithCookies = async (accessToken: string) => {
         return null;
     }
 
-    const user = await db.select().from(users).where(eq(users.id, tokenRecord.userId));
-
-    return user;
+    const userResults = await db.select().from(users).where(eq(users.id, tokenRecord.userId));
+    // Return the first user if found, otherwise null
+    return userResults.length > 0 ? userResults[0] : null;
 };
 
 // Set cookies for authentication
@@ -176,6 +176,7 @@ export const authGuard = async (requiredRole: "admin" | "user" | null = null) =>
     }
 
     const tokenRecord = await verifyToken(accessToken, "access");
+
     if (!tokenRecord) {
         // Try to refresh using refresh token
         const refreshToken = cookieStore.get("refreshToken")?.value;
@@ -185,8 +186,6 @@ export const authGuard = async (requiredRole: "admin" | "user" | null = null) =>
         }
 
         // Attempt to refresh the token
-        // In a real implementation, you would need to get the request object
-        // This is simplified for demonstration
         const refreshResult = await refreshAccessToken(
             refreshToken,
             new Request("http://localhost:3000")
@@ -201,7 +200,13 @@ export const authGuard = async (requiredRole: "admin" | "user" | null = null) =>
     }
 
     // Get user data
-    const user = await db.select().from(users).where(eq(users.id, tokenRecord.userId));
+    if (!tokenRecord) {
+        clearAuthCookies();
+        redirect("/login");
+    }
+
+    const userResults = await db.select().from(users).where(eq(users.id, tokenRecord.userId));
+    const user = userResults.length > 0 ? userResults[0] : null;
 
     if (!user) {
         clearAuthCookies();
