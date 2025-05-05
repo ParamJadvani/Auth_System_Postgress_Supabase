@@ -53,15 +53,20 @@ export const POST = async (req: Request) => {
         }
 
         // Find user by email
+        const userResults = await db
+            .select()
+            .from(users)
+            .where(eq(users.email, email.toLowerCase()));
 
-        const user = await db.select().from(users).where(eq(users.email, email.toLowerCase()));
-
-        if (!user) {
+        // Check if user exists
+        if (userResults.length === 0) {
             return new Response(JSON.stringify({ message: "Invalid email or password" }), {
                 status: 400,
                 headers: { "Content-Type": "application/json" },
             });
         }
+
+        const user = userResults[0];
 
         // Check if email is verified
         if (!user.emailVerified) {
@@ -98,7 +103,7 @@ export const POST = async (req: Request) => {
         });
 
         // Set cookies
-        setAuthCookies(accessToken, refreshToken);
+        await setAuthCookies(accessToken, refreshToken);
 
         // Return user info (exclude sensitive data)
         return new Response(
